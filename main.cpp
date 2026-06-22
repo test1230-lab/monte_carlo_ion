@@ -1,0 +1,167 @@
+#include <iomanip>
+#include <ios>
+#include <iostream>
+#include <print>
+#include <exception>
+#include <vector>
+#include <string>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <atomic>
+#include <format>
+#include <fstream>
+
+#include "Simulation.h"
+#include "Table.h"
+#include "SimConfig.h"
+#include "constants.h"
+#include "npy.hpp"
+
+constexpr uint64_t seed = 123'456'7890ULL;
+
+//idk where to put these
+
+template <int N, int M>
+void write_array2d_npy(const std::string& filename, const std::array<std::array<double, M>, N>& arr)
+{
+    npy::npy_data_ptr<double> d;
+
+    std::array<double, N*M> flat;
+    for (int i = 0; i < N; i++)
+    {
+        for (int j = 0; j < M; j++)
+        {
+            flat[j + i*M] = arr[i][j];
+        }
+    }
+
+    d.data_ptr = flat.data();
+    d.shape = {N, M};
+    d.fortran_order = false;
+
+    npy::write_npy(filename, d);
+}
+
+
+void write_dist_to_file(const std::string& path, const Simulation::Histogram& data, const SimConfig& cfg, double cnorm)
+{
+    std::ofstream file(path);
+
+    //write header
+    file << (cn::nparmx + 1) << ',' << (cn::npermx + 1) << ',' << cfg.get_dlvpar();
+    file << ',' << cfg.get_dlvper() << ',' << cnorm << '\n';
+
+    file << std::scientific << std::setprecision(6);
+
+    //write normalized 2d dist
+    for (int i = 0; i < cn::nparmx + 1; i++)
+    {
+        for (int j = 0; j < cn::npermx + 1; j++)
+        {
+            file << data[i][j];
+            if (j != cn::npermx)
+            {
+                file << ',';
+            }
+        }
+
+        if (i != cn::nparmx)
+        {
+            file << '\n';
+        }
+    }
+}
+
+
+// arg is config file filename
+int main(int argc, char* argv[])
+{
+    if (argc != 2)
+    {
+        std::cerr << "invalid arg count. the argument is the filename of the config file";
+        return 1;
+    }
+
+    SimConfig cfg;
+    try
+    {
+        cfg.init(argv[1]);
+    }
+    catch (const std::exception& e)
+    {
+        std::print(std::cerr, "failed to read config file {} threw: {}\n", argv[1], e.what());
+        return 1;
+    }
+
+    cfg.print_config_summary();
+
+    const Table table{cfg};
+    const int nthreads = cfg.get_nthreads();
+
+    std::vector<Simulation> sims;
+    sims.reserve(nthreads);
+
+    //initalize sim for each thread
+    for (int i = 0; i < nthreads; i++)
+    {
+        //magic number is 64 bit golden ratio used by splitmix64
+        const uint64_t tid = static_cast<uint64_t>(i);
+        const uint64_t thread_seed = seed + 0x9E3779B97F4A7C15ULL*tid;
+        sims.push_back({cfg, table, thread_seed});
+    }
+
+    std::atomic<uint64_t> collisions{0};
+
+    #pragma omp parallel for schedule(dynamic)
+    for (int i = 0; i < nthreads; i++)
+    {
+        sims[i].run_sim(collisions, i);
+    }
+
+    // accumulate every thread's binned distribution into the master grid.
+    //sum_hist takes z_master as a ref and writes to it
+    Simulation::Histogram z_master{};
+    for (const Simulation& s : sims)
+    {
+        s.sum_hist(z_master);
+    }
+
+    //find normalization constant
+    double sum = 0.0;
+    for (int iper = 0; iper <= cn::npermx; iper++)
+    {
+        for (int ipar = 0; ipar <= cn::nparmx; ipar++)
+        {
+            sum += z_master[ipar][iper]*(iper + 0.5)*cfg.get_dlvper();
+        }
+    }
+
+    const double cntnorm = 2.0*sum*cn::pi*cfg.get_dlvpar()*cfg.get_dlvper();
+
+    constexpr double az_floor = -99.99;
+    Simulation::Histogram az{};
+    for (int ipar = 0; ipar <= cn::nparmx; ipar++)
+    {
+        for (int iper = 0; iper <= cn::npermx; iper++)
+        {
+            if (z_master[ipar][iper] > 0.0)
+            {
+                az[ipar][iper] = std::log(z_master[ipar][iper]/((iper + 0.5)*cntnorm));
+            }
+            else
+            {
+                az[ipar][iper] = az_floor;
+            }
+        }
+    }
+
+    const std::string& out = cfg.get_out_filename();
+    //write_array2d_npy<cn::nparmx + 1, cn::npermx + 1>(out + "av.npy", az);
+    write_array2d_npy<cn::nparmx + 1, cn::npermx + 1>(out + "hist.npy", z_master);
+    write_dist_to_file(out + "norm_log_dist.csv", az, cfg, cntnorm);
+
+    std::print("\nResults have been written to disk.\n");
+
+    return 0;
+}
