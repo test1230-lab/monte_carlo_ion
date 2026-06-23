@@ -40,6 +40,13 @@ vec3 Simulation::collis(const vec3& vi, const vec3& vn, const vec3& g, double gs
     const double xlen = 2.0*norma;
     const double ylen = 2.0*norma;
 
+    //gbar, i.e. vector
+    const double gper = std::sqrt(g[1]*g[1] + g[2]*g[2]);
+    if (gper == 0.0 || normg == 0.0)
+    {
+        return vi;
+    }
+
     //pick a point uniformly on the disk of radius norma (reject the square corners)
     double x = 0.0;
     double y = 0.0;
@@ -55,12 +62,6 @@ vec3 Simulation::collis(const vec3& vi, const vec3& vn, const vec3& g, double gs
     x *= norma/r;
     y *= norma/r;
 
-    //gbar, i.e. vector
-    const double gper = std::sqrt(g[1]*g[1] + g[2]*g[2]);
-    if (gper == 0.0 || normg == 0.0)
-    {
-        return vi;
-    }
     const double aax = g[0]*coschi + x*gper/normg;
     const double aay = g[1]*coschi - x*g[1]*g[0]/(normg*gper) + y*g[2]/gper;
     const double aaz = g[2]*coschi - x*g[0]*g[2]/(normg*gper) - y*g[1]/gper;
@@ -96,21 +97,26 @@ void Simulation::run_sim(std::atomic<uint64_t>& coll, int tid)
     double vper = -(d.vd + 1.0)*(rng.uniform() + 0.5);
     vaft[2] = rng.uniform()*100000.0;
 
+    uint64_t reported = 0;
+
     //main loop
     for (uint64_t i = 0; i < n_collisions; i++)
     {
-        // report once per completed block of n_report collisions; using (i + 1)
-        // avoids crediting a full block at i == 0 before any work is done.
-        if ((i + 1) % cn::n_report == 0)
+        // report every n_report collisions and once more on the final
+        // iteration; crediting (done - reported) folds the trailing partial
+        // block into the same path, so the per-thread counts sum to exactly
+        // coll_tot and the progress readout reaches 100%.
+        const uint64_t done = i + 1;
+        if (done % cn::n_report == 0 || done == n_collisions)
         {
-            coll += cn::n_report;
-            const auto coll_now = coll.load(std::memory_order_relaxed);
-            
+            const auto coll_now = (coll += done - reported);
+            reported = done;
+
             #pragma omp critical(print_progress)
             {
                 const double percent = 100.0 * coll_now/static_cast<double>(coll_tot);
-                std::print(stderr, "\r  progress: {} / {} ({:.1f}%)", coll_now, coll_tot, percent);
-                std::fflush(stderr);
+                std::print(stdout, "\r  progress: {} / {} ({:.1f}%)", coll_now, coll_tot, percent);
+                std::fflush(stdout);
             }
         }
 
@@ -123,11 +129,12 @@ void Simulation::run_sim(std::atomic<uint64_t>& coll, int tid)
         double b2pol = 0.0;
         double gt2 = 0.0;
         double ta = 0.0;
-        double bcon = 0.0;   // dimensionless cutoff from the accepted iteration
+        double log_ta = 0.0;
+        double bcon = 0.0;  // dimensionless cutoff from the accepted iteration
 
         while (true)
         {
-            const double rnum = rng.uniform();
+            const double rnum = 1.0 - rng.uniform(); //now its (0,1]
             const double rdis = -std::log(rnum)*alfa;
 
             delth += rdis;
@@ -162,13 +169,15 @@ void Simulation::run_sim(std::atomic<uint64_t>& coll, int tid)
 
             gt2 = g[0]*g[0] + g[1]*g[1] + g[2]*g[2];
             const double gt = std::sqrt(gt2);
-            ta = 0.5*nu.mu*gt2/nu.eps;
+            const double energy = 0.5*nu.mu*gt2;
+            ta = energy/nu.eps;
+            log_ta = std::log10(ta);
 
-            bcon = tbl.bcutoff(ta, ineut, nu.chi_cutoff);
+            bcon = tbl.bcutoff_lookup(ta, log_ta, ineut, nu.chi_cutoff);
             const double bcut = bcon*nu.rm;
             b2pol = bcut*bcut;
-            const double gfactor = 0.5*gt2*nu.mu/cn::bk;
-            b2ex = 2.0/cn::pi*sqr(nu.ar - nu.br*std::log10(gfactor));
+            const double log_gfactor = log_ta + nu.log_eps_over_bk;
+            b2ex = 2.0/cn::pi*sqr(nu.ar - nu.br*log_gfactor);
             b2tot = std::max(b2ex, b2pol);
             b2max = kmax/gt/cn::pi;
             b2 = rng.uniform()*b2max;
@@ -197,7 +206,7 @@ void Simulation::run_sim(std::atomic<uint64_t>& coll, int tid)
                     const double tmp = vbef[idir];
                     vbef[idir] = vneu[idir];
                     vneu[idir] = tmp;
-                    g[idir] *= -1.0;
+                    g[idir] = -g[idir];
                 }
             }
         }
@@ -209,12 +218,12 @@ void Simulation::run_sim(std::atomic<uint64_t>& coll, int tid)
         if (b2 < b2pol)
         {
             const double b = std::sqrt(b2);
-            const double bn = b/neutrals[ineut].rm;
+            const double u = (bcon > 0.0) ? b/(bcon*neutrals[ineut].rm) : 0.0;
 
             // Bilinear lookup of the polarization scattering angle from the
             // table built at startup (replaces the per-collision root-solve +
             // Gauss quadrature). u = bn/bcon in [0,1] always lands on the grid.
-            const double chipol = tbl.chi_lookup(ta, ineut, bn, bcon);
+            const double chipol = tbl.chi_lookup_u(log_ta, ineut, u);
 
             if (chipol != 0.0)
             {

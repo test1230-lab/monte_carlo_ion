@@ -1,5 +1,4 @@
 #include <iomanip>
-#include <ios>
 #include <iostream>
 #include <print>
 #include <exception>
@@ -9,16 +8,14 @@
 #include <cmath>
 #include <cstdint>
 #include <atomic>
-#include <format>
 #include <fstream>
+#include <chrono>
 
 #include "Simulation.h"
 #include "Table.h"
 #include "SimConfig.h"
 #include "constants.h"
 #include "npy.hpp"
-
-constexpr uint64_t seed = 123'456'7890ULL;
 
 //idk where to put these
 
@@ -77,11 +74,15 @@ void write_dist_to_file(const std::string& path, const Simulation::Histogram& da
 // arg is config file filename
 int main(int argc, char* argv[])
 {
+    constexpr uint64_t seed = 123'456'7890ULL;
+
     if (argc != 2)
     {
         std::cerr << "invalid arg count. the argument is the filename of the config file";
         return 1;
     }
+
+    auto t0 = std::chrono::steady_clock::now();
 
     SimConfig cfg;
     try
@@ -111,9 +112,14 @@ int main(int argc, char* argv[])
         sims.push_back({cfg, table, thread_seed});
     }
 
+    auto t1 = std::chrono::steady_clock::now();
+    int ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+    std::print("Initalized in {:.3f}s\n", ms/1000.0);
+
     std::atomic<uint64_t> collisions{0};
 
-    #pragma omp parallel for schedule(dynamic)
+    #pragma omp parallel for num_threads(nthreads)
     for (int i = 0; i < nthreads; i++)
     {
         sims[i].run_sim(collisions, i);
@@ -157,9 +163,9 @@ int main(int argc, char* argv[])
     }
 
     const std::string& out = cfg.get_out_filename();
-    //write_array2d_npy<cn::nparmx + 1, cn::npermx + 1>(out + "av.npy", az);
+    write_array2d_npy<cn::nparmx + 1, cn::npermx + 1>(out + "av.npy", az);
     write_array2d_npy<cn::nparmx + 1, cn::npermx + 1>(out + "hist.npy", z_master);
-    write_dist_to_file(out + "norm_log_dist.csv", az, cfg, cntnorm);
+    write_dist_to_file(out + "_log_dist.csv", az, cfg, cntnorm);
 
     std::print("\nResults have been written to disk.\n");
 

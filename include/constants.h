@@ -13,5 +13,5 @@ namespace cn
     constexpr double pr_mass = 1.67e-24, db = 0.1;
     constexpr int n_report = 1'000'000;
 
-    constexpr double root_finding_tol = 1e-6; //fortran is 1e-5
+    constexpr double root_finding_tol = 1e-5; //fortran is 1e-5
 }

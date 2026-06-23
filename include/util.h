@@ -27,10 +27,10 @@ struct NeutralInfo
     double beta = 0.0;
     double chi_cutoff = 0.0;
     double mass = 0.0;
+    double log_eps_over_bk = 0.0;
 };
 
 struct RCS_Result
 {
     double rcb, rmag, b0;
 };
-

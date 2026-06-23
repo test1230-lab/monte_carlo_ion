@@ -1,4 +1,3 @@
-```makefile
 CXX = g++
 
 TARGET = main
@@ -7,7 +6,7 @@ SRC = main.cpp Table.cpp Simulation.cpp
 OBJ = $(SRC:.cpp=.o)
 DEP = $(OBJ:.o=.d)
 
-CXXFLAGS = -Ofast -march=native -mtune=native -fno-math-errno \
+CXXFLAGS = -O3 -march=native -mtune=native -fno-math-errno \
            -std=c++23 -fopenmp -flto=auto \
            -Wall -I./include -MMD -MP
 
@@ -30,4 +29,3 @@ clean:
 rebuild: clean all
 
 .PHONY: all clean rebuild
-```

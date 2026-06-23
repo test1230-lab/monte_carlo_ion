@@ -1,0 +1,12 @@
+#Ignore everything
+*
+
+#keep these
+!.gitignore
+!main.cpp
+!makefile
+!include/
+!include/**
+!Simulation.cpp
+!Table.cpp
+

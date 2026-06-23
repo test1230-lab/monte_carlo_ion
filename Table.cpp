@@ -201,6 +201,50 @@ double Table::bcutoff(double tan_a, int ineut, double chic) const
     return bcutof;
 }
 
+void Table::init_bcutoff_lookup(const SimConfig& cfg)
+{
+    const auto& neutrals = cfg.get_neutrals();
+
+    for (int ineut = 0; ineut < n_neutrals; ineut++)
+    {
+        const NeutralInfo& nu = neutrals[ineut];
+
+        for (int ita = 0; ita < bcon_ta_dim; ita++)
+        {
+            const double log_ta = chi_log_ta_min + bcon_dlog_ta*ita;
+            const double ta = std::pow(10.0, log_ta);
+            bcon_table[ineut, ita] = bcutoff(ta, ineut, nu.chi_cutoff);
+        }
+    }
+}
+
+double Table::bcutoff_lookup(double tan_a, double log_ta, int ineut, double chic) const
+{
+    if (!std::isfinite(log_ta) || log_ta < chi_log_ta_min || log_ta > chi_log_ta_max)
+    {
+        return bcutoff(tan_a, ineut, chic);
+    }
+
+    const double x = (log_ta - chi_log_ta_min)*bcon_inv_dlog_ta;
+    const int i0 = static_cast<int>(x);
+    if (i0 >= bcon_ta_dim - 1)
+    {
+        return bcon_table[ineut, bcon_ta_dim - 1];
+    }
+
+    const int i1 = i0 + 1;
+    const double fx = x - i0;
+    const double b0 = bcon_table[ineut, i0];
+    const double b1 = bcon_table[ineut, i1];
+    const double rel_jump = std::abs(b1 - b0)/std::max(std::max(std::abs(b0), std::abs(b1)), 1e-300);
+    if (rel_jump > 5e-3)
+    {
+        return bcutoff(tan_a, ineut, chic);
+    }
+
+    return (1.0 - fx)*b0 + fx*b1;
+}
+
 void Table::init_chi_table(const SimConfig& cfg)
 {
     // Tabulate the polarization scattering angle chi(ta, bn) once, on a
@@ -233,7 +277,14 @@ void Table::init_chi_table(const SimConfig& cfg)
                 const double bn = u*bcon;
 
                 const RCS_Result res = scatter::rcs(false, ta, bn);
-                chi_table[ineut, ita, iu] = scatter::scattering_angle<20>(res.rmag, res.rcb, bn, ta);
+                // Store |chi|: scattering_angle returns the signed deflection,
+                // which is large-and-negative for attractive/orbiting impact
+                // parameters. Only the magnitude is physical here because collis()
+                // randomizes the azimuth (the Fortran TABLE likewise stores
+                // ABS(CHI)). Storing the signed value would (a) cancel under
+                // interpolation across the sign change and (b) be clamped away in
+                // chi_lookup, zeroing every attractive collision.
+                chi_table[ineut, ita, iu] = std::abs(scatter::scattering_angle<20>(res.rmag, res.rcb, bn, ta));
             }
         }
     }
@@ -246,15 +297,25 @@ double Table::chi_lookup(double tan_a, int ineut, double bn, double bcon) const
         return 0.0;
     }
 
+    return chi_lookup_u(std::log10(tan_a), ineut, bn/bcon);
+}
+
+double Table::chi_lookup_u(double log_ta, int ineut, double u) const
+{
+    if (!std::isfinite(log_ta))
+    {
+        return 0.0;
+    }
+
     // fractional coordinate along log10(ta), clamped into the grid
-    double x = (std::log10(tan_a) - chi_log_ta_min)*chi_inv_dlog_ta;
+    double x = (log_ta - chi_log_ta_min)*chi_inv_dlog_ta;
     x = std::clamp(x, 0.0, static_cast<double>(chi_ta_dim - 1));
     const int i0 = static_cast<int>(x);
     const int i1 = std::min(i0 + 1, chi_ta_dim - 1);
     const double fx = x - i0;
 
     // fractional coordinate along u = bn/bcon in [0,1]
-    double y = std::clamp(bn/bcon, 0.0, 1.0)*chi_inv_du;
+    double y = std::clamp(u, 0.0, 1.0)*chi_inv_du;
     y = std::clamp(y, 0.0, static_cast<double>(chi_u_dim - 1));
     const int j0 = static_cast<int>(y);
     const int j1 = std::min(j0 + 1, chi_u_dim - 1);
@@ -268,5 +329,8 @@ double Table::chi_lookup(double tan_a, int ineut, double bn, double bcon) const
     const double c0 = (1.0 - fx)*c00 + fx*c10;
     const double c1 = (1.0 - fx)*c01 + fx*c11;
 
-    return std::clamp((1.0 - fy)*c0 + fy*c1, 0.0, cn::pi);
+    // chi_table holds |chi| (>= 0), which can exceed pi in the orbiting regime,
+    // so only floor at 0 (guard interpolation undershoot) -- do NOT clamp to pi,
+    // which would discard large-angle/orbiting deflections.
+    return std::max((1.0 - fy)*c0 + fy*c1, 0.0);
 }
